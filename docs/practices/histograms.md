@@ -3,24 +3,127 @@ title: Histograms and summaries
 sort_rank: 4
 ---
 
-NOTE: This document predates native histograms (added as an experimental
-feature in Prometheus v2.40 and becoming stable in v3.8). The intention is to
-thoroughly update this document in the foreseeable future.
+Histograms and summaries are more complex metric types. For historical reasons,
+histograms exist in two variants: classic histograms and native histograms, the
+latter even come in a number of sub-variants. This document helps to understand
+the difference between all those metric types, how to use them correctly, and
+how to pick the right metric type for your use case.
 
-Histograms and summaries are more complex metric types. Not only does
-a single histogram or summary create a multitude of time series, it is
-also more difficult to use these metric types correctly. This section
-helps you to pick and configure the appropriate metric type for your
-use case.
+The most important lesson to learn from this document is simple: If you can,
+use native histograms and prefer them over both classic histograms and
+summaries.
 
-## Library support
+Where things start to become tricky is if you find yourself in a situation
+where you cannot simply use native histograms. Most commenly, you might have to
+work with existing metrics that include classic histograms or summaries, or
+maybe the instrumentation library you are using does not support native
+histograms yet. Furthermore, there are a few specific use cases where you might
+prefer a summary or a classic histogram.
+
+With this document, you should be able to navigate the related obstacles and
+subtleties.
+
+## Overview
+
+Historically, a sample in the Prometheus world was just a timestamped floating
+point value. This value could be interpreted as a
+[counter](/docs/concepts/metric_types/#counter) or as a
+[gauge](/docs/concepts/metric_types/#gauge), i.e. most of the time Prometheus
+doesn't maintain a notion of “static typing”, and you just have to know what
+kind of metric you are dealing with (assisted by the convention that the name
+of a counter should end on `_total`).
+
+But there are more metric types than counters and gauges. In particular, there
+is a need to represent distributions of observed values (usually simply called
+“observations” in Prometheus terminology). There are fundamentally two
+different approaches:
+
+1. The instrumented program calculates a number of pre-configured quantiles
+   (e.g. the median or the 90th percentile) over pre-configured time windows
+   (e.g. the last ten minutes) and exposes them as additional metrics.
+   Prometheus implements this approach in the form of a metric type called
+   _summary_. Depending on the used algorithm, the pre-calculated quantiles are
+   usually very precise. But the calculation has a resource cost for the
+   instrumented program. Also, you cannot “recalculate” the quantiles later, if
+   you desire another time window or another percentile, and most importantly,
+   you cannot aggregate quantiles (e.g. to calculate the total 90th percentile
+   latency for a service backed by multiple replicated workers).
+2. The instrumented program represents the distribution in a more fundamental
+   way that can later be used to calculate arbitrary quantiles over arbitrary
+   time windows and most imporantly can be aggregated with other distributions.
+   This is often called a _digest_. Prometheus implements this approach in the
+   form of a metric type called _histogram_, where observations are counted in
+   buckets, as you might know it from the general concept of a
+   [histogram](https://en.wikipedia.org/wiki/Histogram).
+
+In both approaches, Prometheus also collects the count and the sum of
+observations (see details [below](#count-and-sum-of-observations)).
+
+Common to both approaches is the need to collect a whole lot of numerical
+values per sample, not just a single floating point value as before:
+
+- In any case the count and sum of observations.
+- In the case of summaries the pre-calculated quantiles.
+- In the case of histograms the bucket populations.
+
+The new types of metrics are also called _composite types_.
+
+In a first approach, Prometheus preserved its data model of simple timestamped
+floating point values and mapped this multitude of values into one time series
+each, distinguished by specific labels. In this way, summaries and classic
+histograms were created. In both, the count and sum of observations are each
+tracked in a separate time series. Similarly, each pre-calculated quantile of a
+summary and each bucket of a histogram is tracked in its own time series.
+PromQL operators and functions act on these individual time series, as
+explained in detail further below.
+
+On the one hand, this approach has worked quite well. While keeping the data
+model simple, it satisfies many use cases. On the other hand, it suffers from
+many limitations, especially when it comes to histograms. Thus, much later in
+Prometheus's lifetime, native histograms were introduced. A native histogram
+sample is a “structucered value”, where a single sample contains the count and
+sum of observations and a dynamic number of buckets with their population count
+and boundaries. In the Prometheus TSDB, one histogram results in one time
+series of native histogram samples rather than a bunch of independent time
+series. PromQL operators and functions act on these complex samples, in a
+slightly different way as on the individual time series of floats before.
+
+You can read everything about native histograms in its
+[specification](/docs/specs/native_histograms/), but be warned that this is a
+very technical and detailed document. If you read on here, you can expect a
+more digestible and usage focused explanation.
+
+If you are interested in Prometheus's journey towards native representation of
+composite types, you can read more in a [blog
+post](/blog/2026/02/14/modernizing-prometheus-composite-samples/).
+
+## Instrumentation library support
 
 First of all, check the library support for
 [histograms](/docs/concepts/metric_types/#histogram) and
 [summaries](/docs/concepts/metric_types/#summary).
 
-Some libraries support only one of the two types, or they support summaries
-only in a limited fashion (lacking [quantile calculation](#quantiles)).
+Summaries are usually supported by all libraries, but some might only track the
+count and sum of observations and omit the [quantile calculation](#quantiles).
+(Quantile-less summaries is still a legitimate use of summaries.)
+
+Classic histogram support is also widespread, but native histogram support is
+still rare. Currently, the latter requires exposition via the protobuf format.
+Support in a text-based format is underway as part of OpenMetrics v2. Stay
+tuned…
+
+Even if your instrumented program only exposes classic histogram, you can
+configure Prometheus to ingest them as native histograms anyway. This will
+happen in the form of _Native Histograms with Custom Bucket boundaries_ (NHCB).
+These NHCBs have some limitations compared to the usual native histograms
+(which feature so-called standard exponential buckets), but they are still much
+more efficient to store than pure classic histograms. NHCBs handling in PromQL
+is the same as for other native histograms, so a later migration to “real”
+native histograms will be easy.
+
+<!--TODO mark-->
+
+<!-- OTel -->
 
 ## Count and sum of observations
 
